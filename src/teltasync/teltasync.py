@@ -8,12 +8,14 @@ from aiohttp import ClientSession
 
 from teltasync.api_base import ApiResponse
 from teltasync.auth import Auth
+from teltasync.backup import Backup
 from teltasync.data_usage import DataUsage, ModemDataUsage
 from teltasync.exceptions import (
     TeltonikaAuthenticationError,
     TeltonikaConnectionError,
     TeltonikaException,
 )
+from teltasync.firmware import Firmware, FirmwareStatus, FirmwareUpdateInfo
 from teltasync.gps import Gps, GpsStatusData
 from teltasync.modems import Modems, ModemStatusFull, ModemStatusOffline
 from teltasync.network import Network, WanStatusData
@@ -53,6 +55,8 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         self._network: Network | None = None
         self._data_usage: DataUsage | None = None
         self._wireless: Wireless | None = None
+        self._firmware: Firmware | None = None
+        self._backup: Backup | None = None
 
     @classmethod
     async def create(
@@ -243,6 +247,70 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         response = await self.wireless.set_enabled(interface_id, enabled)
         return bool(response and response.success)
 
+    async def get_firmware_status(self) -> FirmwareStatus | None:
+        """
+        Fetch installed firmware version and available update info.
+
+        Returns None when the endpoint is not available on this firmware version.
+        """
+        await self._ensure_session()
+        try:
+            response = await self.firmware.get_status()
+            if response.success and response.data:
+                return response.data
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    async def check_firmware_update(self) -> FirmwareUpdateInfo | None:
+        """
+        Trigger an online firmware update check.
+
+        Returns FirmwareUpdateInfo when an update is available, None otherwise.
+        """
+        await self._ensure_session()
+        try:
+            response = await self.firmware.check_update()
+            if response.success and response.data:
+                return response.data
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    async def install_firmware_update(self) -> bool:
+        """
+        Start the firmware update installation.
+
+        Returns True when the router accepted the request.
+        Note: The router will reboot during the update process.
+        """
+        await self._ensure_session()
+        response = await self.firmware.install_update()
+        return bool(response and response.success)
+
+    async def export_config(self) -> bytes:
+        """
+        Download the router configuration as a binary archive.
+
+        Returns raw bytes of the configuration backup.
+        Raises RuntimeError when no backup endpoint is available.
+        """
+        await self._ensure_session()
+        return await self.backup.export_config()
+
+    async def import_config(self, data: bytes) -> bool:
+        """
+        Upload a configuration archive to restore router settings.
+
+        Args:
+            data: Raw bytes of the configuration backup.
+
+        Returns True when the router accepted the restore request.
+        """
+        await self._ensure_session()
+        response = await self.backup.import_config(data)
+        return bool(response and response.success)
+
     async def logout(self) -> bool:
         """Log out of the authenticated API session."""
 
@@ -323,6 +391,22 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         if self._wireless is None:
             self._wireless = Wireless(self.auth)
         return self._wireless
+
+    @property
+    def firmware(self) -> Firmware:
+        """Return lazy-initialized firmware endpoint client."""
+
+        if self._firmware is None:
+            self._firmware = Firmware(self.auth)
+        return self._firmware
+
+    @property
+    def backup(self) -> Backup:
+        """Return lazy-initialized backup/restore endpoint client."""
+
+        if self._backup is None:
+            self._backup = Backup(self.auth)
+        return self._backup
 
     async def _ensure_session(self) -> ClientSession:
         """Internal helper to guarantee session initialization."""

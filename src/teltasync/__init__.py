@@ -6,7 +6,9 @@ from teltasync.exceptions import (
     TeltonikaException,
     TeltonikaInvalidCredentialsError,
 )
+from teltasync.backup import Backup
 from teltasync.data_usage import DataUsage, ModemDataUsage, SimUsageData
+from teltasync.firmware import Firmware, FirmwareStatus, FirmwareUpdateInfo
 from teltasync.gps import Gps, GpsStatusData
 from teltasync.network import Network, WanStatusData
 from teltasync.teltasync import Teltasync
