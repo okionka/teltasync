@@ -177,32 +177,20 @@ class Backup:
 
     async def download(self, sha256: str | None = None) -> bytes:
         """
-        Download the backup archive.
-
-        The correct method is POST (not GET) with the sha256 from generate().
-        Falls back to several alternative paths/methods if the primary fails.
+        POST /backup/actions/download  {"data": {}}
+        Same pattern as generate — no parameters needed in the body.
+        The sha256 from generate() is used for verification after download,
+        NOT sent in the request body.
         """
-        # Build candidate requests: (method, path, body)
-        candidates = []
-
-        # Primary: POST with sha256 reference
-        if sha256:
-            candidates += [
-                ("POST", "backup/actions/download",
-                 {"data": {"sha256": sha256}}),
-                ("POST", "backup/actions/download",
-                 {"data": {}, "sha256": sha256}),
-            ]
-        # POST without body
-        candidates += [
+        # Ordered by most-likely-to-work first
+        candidates = [
+            # Primary: same pattern as generate (confirmed working)
             ("POST", "backup/actions/download", {"data": {}}),
+            # Fallbacks for other firmware versions
             ("POST", "backup/actions/download", {}),
-        ]
-        # GET fallbacks (some firmware versions)
-        candidates += [
             ("GET",  "backup/actions/download", None),
             ("GET",  "backup/download",         None),
-            ("POST", "backup/download",          {"data": {}}),
+            ("POST", "backup/download",         {"data": {}}),
         ]
 
         for method, path, body in candidates:
@@ -210,36 +198,46 @@ class Backup:
                 kwargs = {"json": body} if body is not None else {}
                 async with await self.auth.request(method, path, **kwargs) as resp:
                     _LOGGER.warning(
-                        "Backup download: %s %s body=%s → HTTP %s",
+                        "Backup download: %s %s body=%s → HTTP %s content-type=%s",
                         method, path, body, resp.status,
+                        resp.headers.get("Content-Type", "?"),
                     )
-                    if resp.status in (404, 501):
+                    if resp.status in (404, 501, 405):
+                        continue
+                    if resp.status == 422:
+                        _LOGGER.warning(
+                            "Backup download: 422 on %s %s — trying next", method, path
+                        )
                         continue
                     resp.raise_for_status()
-                    # Check if response is binary (not JSON error)
-                    ct = resp.headers.get("Content-Type", "")
-                    if "json" in ct and resp.status != 200:
-                        continue
                     data = await resp.read()
-                    if len(data) < 10:
-                        _LOGGER.warning("Backup download: suspiciously small response (%d bytes)", len(data))
+                    if len(data) < 100:
+                        try:
+                            import json
+                            err_body = json.loads(data)
+                            _LOGGER.warning(
+                                "Backup download: short response, likely error JSON: %s",
+                                err_body,
+                            )
+                        except Exception:
+                            pass
                         continue
                     _LOGGER.warning(
-                        "Backup download OK: %s %s → %d bytes (Content-Type: %s)",
-                        method, path, len(data), ct,
+                        "Backup download OK: %s %s → %d bytes",
+                        method, path, len(data),
                     )
                     return data
             except aiohttp.ClientResponseError as err:
                 _LOGGER.warning(
                     "Backup download: %s %s → HTTP %s", method, path, err.status
                 )
-                if err.status in (404, 501):
+                if err.status in (404, 501, 405, 422):
                     continue
                 raise
 
         raise RuntimeError(
-            "backup/actions/download: no working method/path found. "
-            "Check HA logs for HTTP status codes."
+            "backup/actions/download: all attempts failed — "
+            "check HA logs for HTTP status codes per attempt."
         )
 
     async def generate_and_download(self) -> "tuple[bytes, GenerateResult]":
