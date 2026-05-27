@@ -175,26 +175,82 @@ class Backup:
             elapsed += interval
         raise TimeoutError(f"Backup not ready after {timeout:.0f}s")
 
-    async def download(self) -> bytes:
-        """GET /backup/actions/download → raw bytes."""
-        async with await self.auth.request(
-            "GET", "backup/actions/download"
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.read()
-            _LOGGER.info("Backup downloaded: %d bytes", len(data))
-            return data
-
-    async def generate_and_download(self) -> tuple[bytes, "GenerateResult"]:
+    async def download(self, sha256: str | None = None) -> bytes:
         """
-        Full backup flow: generate → download.
-        No status polling needed — generate() waits synchronously.
-        Returns (bytes, GenerateResult) so caller can verify sha256.
+        Download the backup archive.
+
+        The correct method is POST (not GET) with the sha256 from generate().
+        Falls back to several alternative paths/methods if the primary fails.
+        """
+        # Build candidate requests: (method, path, body)
+        candidates = []
+
+        # Primary: POST with sha256 reference
+        if sha256:
+            candidates += [
+                ("POST", "backup/actions/download",
+                 {"data": {"sha256": sha256}}),
+                ("POST", "backup/actions/download",
+                 {"data": {}, "sha256": sha256}),
+            ]
+        # POST without body
+        candidates += [
+            ("POST", "backup/actions/download", {"data": {}}),
+            ("POST", "backup/actions/download", {}),
+        ]
+        # GET fallbacks (some firmware versions)
+        candidates += [
+            ("GET",  "backup/actions/download", None),
+            ("GET",  "backup/download",         None),
+            ("POST", "backup/download",          {"data": {}}),
+        ]
+
+        for method, path, body in candidates:
+            try:
+                kwargs = {"json": body} if body is not None else {}
+                async with await self.auth.request(method, path, **kwargs) as resp:
+                    _LOGGER.warning(
+                        "Backup download: %s %s body=%s → HTTP %s",
+                        method, path, body, resp.status,
+                    )
+                    if resp.status in (404, 501):
+                        continue
+                    resp.raise_for_status()
+                    # Check if response is binary (not JSON error)
+                    ct = resp.headers.get("Content-Type", "")
+                    if "json" in ct and resp.status != 200:
+                        continue
+                    data = await resp.read()
+                    if len(data) < 10:
+                        _LOGGER.warning("Backup download: suspiciously small response (%d bytes)", len(data))
+                        continue
+                    _LOGGER.warning(
+                        "Backup download OK: %s %s → %d bytes (Content-Type: %s)",
+                        method, path, len(data), ct,
+                    )
+                    return data
+            except aiohttp.ClientResponseError as err:
+                _LOGGER.warning(
+                    "Backup download: %s %s → HTTP %s", method, path, err.status
+                )
+                if err.status in (404, 501):
+                    continue
+                raise
+
+        raise RuntimeError(
+            "backup/actions/download: no working method/path found. "
+            "Check HA logs for HTTP status codes."
+        )
+
+    async def generate_and_download(self) -> "tuple[bytes, GenerateResult]":
+        """
+        Full backup flow: generate → download (no polling needed).
+        Passes sha256 to download() for the POST body.
         """
         _LOGGER.info("Step 1/2: Generating backup on router…")
         result = await self.generate()
-        _LOGGER.info("Step 2/2: Downloading backup…")
-        data = await self.download()
+        _LOGGER.info("Step 2/2: Downloading backup (sha256=%s)…", result.sha256)
+        data = await self.download(sha256=result.sha256)
         return data, result
 
     # ------------------------------------------------------------------
