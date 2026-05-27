@@ -12,20 +12,22 @@ from teltasync.base_model import TeltasyncBaseModel
 
 _LOGGER = logging.getLogger(__name__)
 
-# Firmware-version-dependent paths tried in order
+# All known GPS endpoint paths across RutOS firmware versions — tried in order
 _GPS_PATHS = [
+    "gps/position/status",   # RUTX50 RutOS 7.x primary
     "gps/status",
     "gps/position",
     "gps",
+    "device/gps/status",
 ]
 
 
 def _to_float(v: Any) -> float | None:
-    if v is None or v == "" or v == "N/A" or v == "unknown":
+    """Parse float, return None only for truly empty values — NOT for 0.0."""
+    if v is None or v == "" or v == "N/A" or v == "unknown" or v == "n/a":
         return None
     try:
-        f = float(v)
-        return None if f == 0.0 else f   # 0.0 = no fix placeholder
+        return float(v)
     except (ValueError, TypeError):
         return None
 
@@ -34,87 +36,83 @@ def _to_int(v: Any) -> int | None:
     if v is None or v == "" or v == "N/A" or v == "unknown":
         return None
     try:
-        return int(v)
+        return int(float(v))
     except (ValueError, TypeError):
         return None
 
 
 class GpsStatusData(TeltasyncBaseModel):
-    """GPS status data returned by the GPS endpoint.
+    """GPS status — AliasChoices covers all known RutOS field name variants."""
 
-    Field aliases cover the varying naming conventions across RutOS firmware
-    versions (full names, short names, camelCase from alias_generator).
-    """
-
-    enabled: bool | None = Field(None, description="GPS enabled state")
+    enabled: bool | None = Field(None)
 
     fix: bool | None = Field(
         None,
-        validation_alias=AliasChoices("fix", "hasFix", "has_fix", "fixAcquired"),
-        description="GPS fix acquired",
+        validation_alias=AliasChoices(
+            "fix", "hasFix", "has_fix", "fixAcquired", "fix_acquired",
+        ),
     )
     fix_status: str | None = Field(
         None,
         validation_alias=AliasChoices(
-            "fix_status", "fixStatus", "status", "fixState", "fix_state"
+            "fix_status", "fixStatus", "status", "fixState", "fix_state",
+            "fixQuality", "fix_quality",
         ),
-        description="Human-readable fix status, e.g. 'Fix' / 'No fix'",
     )
 
     latitude: float | None = Field(
         None,
-        validation_alias=AliasChoices("latitude", "lat", "Lat", "latitude_d"),
-        description="Latitude in decimal degrees",
+        validation_alias=AliasChoices(
+            "latitude", "lat", "Lat", "latitude_d", "lat_d",
+        ),
     )
     longitude: float | None = Field(
         None,
         validation_alias=AliasChoices(
-            "longitude", "lon", "lng", "Long", "longitude_d"
+            "longitude", "lon", "lng", "Long", "longitude_d", "lon_d",
         ),
-        description="Longitude in decimal degrees",
     )
     altitude: float | None = Field(
         None,
-        validation_alias=AliasChoices("altitude", "alt", "Alt", "elevation"),
-        description="Altitude in metres",
+        validation_alias=AliasChoices(
+            "altitude", "alt", "Alt", "elevation", "height",
+        ),
     )
     speed: float | None = Field(
         None,
-        validation_alias=AliasChoices("speed", "spd", "groundSpeed", "ground_speed"),
-        description="Speed in km/h",
+        validation_alias=AliasChoices(
+            "speed", "spd", "groundSpeed", "ground_speed", "kmh",
+        ),
     )
     num_satellites: int | None = Field(
         None,
         validation_alias=AliasChoices(
             "num_satellites", "numSatellites", "satellites",
-            "sats", "numSat", "num_sat",
+            "sats", "numSat", "num_sat", "sat_count",
         ),
-        description="Number of visible satellites",
     )
     accuracy: float | None = Field(
         None,
-        validation_alias=AliasChoices("accuracy", "hdop", "hDop", "h_dop", "pdop"),
-        description="Horizontal accuracy (HDOP)",
+        validation_alias=AliasChoices(
+            "accuracy", "hdop", "hDop", "h_dop", "pdop",
+            "horizontal_accuracy", "horizontalAccuracy",
+        ),
     )
     datetime: str | None = Field(
         None,
         validation_alias=AliasChoices(
-            "datetime", "dateTime", "date_time", "timestamp", "utc_datetime"
+            "datetime", "dateTime", "date_time",
+            "timestamp", "utc_datetime", "time",
         ),
-        description="UTC datetime string (YYYY-MM-DD hh:mm:ss)",
     )
     date: str | None = Field(
         None,
         validation_alias=AliasChoices("date", "utc_date", "gpsDate"),
-        description="UTC date (YYYY-MM-DD)",
-    )
-    time: str | None = Field(
-        None,
-        validation_alias=AliasChoices("time", "utc_time", "gpsTime"),
-        description="UTC time (hh:mm:ss)",
     )
 
-    @field_validator("latitude", "longitude", "altitude", "speed", "accuracy", mode="before")
+    @field_validator(
+        "latitude", "longitude", "altitude", "speed", "accuracy", mode="before"
+    )
     @classmethod
     def _parse_float(cls, v: Any) -> float | None:
         return _to_float(v)
@@ -134,7 +132,7 @@ class GpsStatusData(TeltasyncBaseModel):
         if isinstance(v, int):
             return bool(v)
         s = str(v).lower()
-        if s in ("true", "1", "fix", "fixed", "yes", "acquired"):
+        if s in ("true", "1", "fix", "fixed", "yes", "acquired", "3d", "2d"):
             return True
         if s in ("false", "0", "no fix", "nofix", "no", "none", ""):
             return False
@@ -142,22 +140,21 @@ class GpsStatusData(TeltasyncBaseModel):
 
     @model_validator(mode="after")
     def _derive_fix_status(self) -> "GpsStatusData":
-        """Derive fix_status from fix bool if not provided by API."""
         if self.fix_status is None and self.fix is not None:
             self.fix_status = "Fix" if self.fix else "No fix"
         return self
 
 
 class Gps:
-    """API wrapper for /gps endpoints."""
+    """API wrapper for GPS endpoints."""
 
     def __init__(self, auth: Auth) -> None:
         self.auth = auth
 
     async def get_status(self) -> ApiResponse[GpsStatusData]:
         """
-        Return current GPS fix and position data.
-        Tries multiple endpoint paths for firmware compatibility.
+        Fetch GPS status. Tries all known endpoint paths in order.
+        Logs the successful path and raw response at WARNING level for debugging.
         """
         last_err: Exception | None = None
 
@@ -165,20 +162,26 @@ class Gps:
             try:
                 async with await self.auth.request("GET", path) as resp:
                     if resp.status == 404:
+                        _LOGGER.debug("GPS path not found: %s", path)
                         continue
                     resp.raise_for_status()
                     json_response = await resp.json()
-                    _LOGGER.debug("GPS response from %s: %s", path, json_response)
+                    _LOGGER.warning(
+                        "GPS endpoint hit: %s | raw response: %s",
+                        path, json_response,
+                    )
                     return ApiResponse[GpsStatusData](**json_response)
             except aiohttp.ClientResponseError as err:
                 if err.status == 404:
                     continue
+                _LOGGER.warning("GPS path %s error: %s", path, err)
                 last_err = err
             except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("GPS path %s exception: %s", path, err)
                 last_err = err
 
-        if last_err:
-            raise last_err
-
-        # All paths returned 404 — return empty response
+        _LOGGER.warning(
+            "GPS: no endpoint responded from %s — last error: %s",
+            _GPS_PATHS, last_err,
+        )
         return ApiResponse[GpsStatusData](success=False, data=None)
