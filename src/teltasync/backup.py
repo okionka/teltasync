@@ -105,18 +105,58 @@ class Backup:
 
     async def generate(self) -> ApiResponse[dict]:
         """
-        POST /backup/actions/generate with empty JSON body.
-        The 422 error occurs when no Content-Type/body is sent.
+        POST /backup/actions/generate.
+
+        RutOS API requires a JSON body. Tries several body formats
+        since different firmware versions differ:
+          {"data": {}}  ← primary (RutOS REST envelope)
+          {}            ← fallback 1
+          {"type": "full"} ← fallback 2
         """
-        async with await self.auth.request(
-            "POST", "backup/actions/generate",
-            json={},                       # ← required: empty JSON object
-            headers={"Content-Type": "application/json"},
-        ) as resp:
-            resp.raise_for_status()
-            raw = await resp.json()
-            _LOGGER.debug("Backup generate response: %s", raw)
-            return ApiResponse[dict](**raw)
+        _GENERATE_PATHS = [
+            "backup/actions/generate",
+            "system/backup/actions/generate",
+            "system/maintenance/backup/generate",
+        ]
+        _BODIES = [
+            {"data": {}},
+            {},
+            {"data": {"type": "full"}},
+        ]
+
+        for path in _GENERATE_PATHS:
+            for body in _BODIES:
+                try:
+                    async with await self.auth.request(
+                        "POST", path, json=body,
+                    ) as resp:
+                        _LOGGER.warning(
+                            "Backup generate: POST %s body=%s → HTTP %s",
+                            path, body, resp.status,
+                        )
+                        if resp.status == 422:
+                            continue  # try next body
+                        if resp.status == 404:
+                            break  # try next path
+                        resp.raise_for_status()
+                        raw = await resp.json()
+                        _LOGGER.warning("Backup generate OK: %s", raw)
+                        return ApiResponse[dict](**raw)
+                except aiohttp.ClientResponseError as err:
+                    if err.status in (404, 422):
+                        _LOGGER.warning(
+                            "Backup generate: POST %s body=%s → %s",
+                            path, body, err.status,
+                        )
+                        if err.status == 404:
+                            break
+                        continue
+                    raise
+
+        raise RuntimeError(
+            "backup/actions/generate: all body formats returned 422 "
+            "— check HA logs for details and report the working format."
+        )
 
     async def get_status(self) -> BackupStatus:
         """GET /backup/errors/status — poll until done."""
