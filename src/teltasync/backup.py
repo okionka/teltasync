@@ -1,14 +1,14 @@
 """Configuration backup and restore endpoint bindings for the Teltonika API.
 
-Backup flow:
-  1. POST /backup/actions/generate   → create backup on router
-  2. GET  /backup/errors/status      → poll until done
-  3. GET  /backup/actions/download   → download bytes
+Backup flow (from Teltonika developer examples):
+  1. POST /backup/actions/generate   {data:{}}  → start backup creation
+  2. GET  /backup/errors/status               → poll until status="done"
+  3. GET  /backup/actions/download            → returns binary archive
 
 Restore flow:
-  1. POST /backup/actions/upload     → upload backup file
-  2. POST /backup/actions/validate   → returns backup metadata
-  3. POST /backup/actions/apply      → apply restore (reboots router)
+  1. POST /backup/actions/upload    (multipart file)
+  2. POST /backup/actions/validate  → returns backup metadata
+  3. POST /backup/actions/apply     → apply + reboot
 """
 import asyncio
 import io
@@ -24,49 +24,58 @@ from teltasync.base_model import TeltasyncBaseModel
 
 _LOGGER = logging.getLogger(__name__)
 
-_POLL_INTERVAL = 2.0   # seconds between status polls
-_POLL_TIMEOUT  = 60.0  # max seconds to wait for backup generation
+_POLL_INTERVAL = 2.0
+_POLL_TIMEOUT  = 120.0
 
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
 
 class BackupStatus(TeltasyncBaseModel):
     status: str | None = Field(
         None,
-        validation_alias=AliasChoices("status", "state", "backup_status"),
-        description="'done', 'generating', 'error', 'idle'",
+        validation_alias=AliasChoices(
+            "status", "state", "backup_status", "errorStatus",
+        ),
     )
-    error: str | None = Field(None)
-    filename: str | None = Field(None)
+    error: str | None = Field(
+        None,
+        validation_alias=AliasChoices("error", "message", "errorMessage"),
+    )
+    filename: str | None = None
 
     @property
     def is_done(self) -> bool:
-        return (self.status or "").lower() in ("done", "complete", "ready", "success")
+        s = (self.status or "").lower()
+        return s in ("done", "complete", "ready", "success", "0", "ok")
 
     @property
     def is_error(self) -> bool:
-        return (self.status or "").lower() in ("error", "failed", "failure")
+        s = (self.status or "").lower()
+        return s in ("error", "failed", "failure") or (
+            self.status is not None
+            and self.status not in ("done", "complete", "ready", "success",
+                                    "0", "ok", "generating", "pending", "running", "")
+        )
 
 
 class BackupMetadata(TeltasyncBaseModel):
-    """Metadata returned by /backup/actions/validate."""
     version: str | None = Field(
         None,
-        validation_alias=AliasChoices("version", "fw_version", "firmware_version"),
+        validation_alias=AliasChoices(
+            "version", "fw_version", "firmware_version", "fwVersion",
+        ),
     )
     date: str | None = Field(
         None,
-        validation_alias=AliasChoices("date", "created_at", "timestamp", "backup_date"),
+        validation_alias=AliasChoices(
+            "date", "created_at", "timestamp", "backup_date", "createdAt",
+        ),
     )
-    hostname: str | None = Field(None)
-    model: str | None = Field(None)
-    serial: str | None = Field(None)
-    size: int | None = Field(None)
+    hostname: str | None = None
+    model: str | None = None
+    serial: str | None = None
+    size: int | None = None
     valid: bool | None = Field(
         None,
-        validation_alias=AliasChoices("valid", "is_valid", "success"),
+        validation_alias=AliasChoices("valid", "is_valid", "success", "isValid"),
     )
 
     def summary(self) -> str:
@@ -86,39 +95,39 @@ class BackupMetadata(TeltasyncBaseModel):
         return "\n".join(parts) if parts else "Keine Metadaten verfügbar"
 
 
-# ---------------------------------------------------------------------------
-# Client
-# ---------------------------------------------------------------------------
-
 class Backup:
     def __init__(self, auth: Auth) -> None:
         self.auth = auth
-
-    async def _request(
-        self, method: str, path: str, **kwargs: Any
-    ) -> aiohttp.ClientResponse:
-        return await self.auth.request(method, path, **kwargs)
 
     # ------------------------------------------------------------------
     # Backup
     # ------------------------------------------------------------------
 
     async def generate(self) -> ApiResponse[dict]:
-        """POST /backup/actions/generate — trigger backup creation on router."""
-        async with await self._request("POST", "backup/actions/generate") as resp:
+        """
+        POST /backup/actions/generate with empty JSON body.
+        The 422 error occurs when no Content-Type/body is sent.
+        """
+        async with await self.auth.request(
+            "POST", "backup/actions/generate",
+            json={},                       # ← required: empty JSON object
+            headers={"Content-Type": "application/json"},
+        ) as resp:
             resp.raise_for_status()
-            return ApiResponse[dict](**await resp.json())
+            raw = await resp.json()
+            _LOGGER.debug("Backup generate response: %s", raw)
+            return ApiResponse[dict](**raw)
 
     async def get_status(self) -> BackupStatus:
-        """GET /backup/errors/status — poll backup generation status."""
-        # Try both known status endpoints
+        """GET /backup/errors/status — poll until done."""
         for path in ("backup/errors/status", "backup/status"):
             try:
-                async with await self._request("GET", path) as resp:
+                async with await self.auth.request("GET", path) as resp:
                     if resp.status == 404:
                         continue
                     resp.raise_for_status()
                     raw = await resp.json()
+                    _LOGGER.debug("Backup status (%s): %s", path, raw)
                     data = raw.get("data", raw)
                     return BackupStatus(**(data if isinstance(data, dict) else {}))
             except aiohttp.ClientResponseError as err:
@@ -132,30 +141,33 @@ class Backup:
         interval: float = _POLL_INTERVAL,
         timeout: float = _POLL_TIMEOUT,
     ) -> BackupStatus:
-        """Poll status until done or error, raises TimeoutError if too long."""
         elapsed = 0.0
         while elapsed < timeout:
             status = await self.get_status()
-            _LOGGER.debug("Backup status: %s", status.status)
+            _LOGGER.debug("Backup poll: status=%s elapsed=%.0fs", status.status, elapsed)
             if status.is_done:
                 return status
             if status.is_error:
-                raise RuntimeError(f"Backup generation failed: {status.error or status.status}")
+                raise RuntimeError(
+                    f"Backup generation failed: {status.error or status.status}"
+                )
             await asyncio.sleep(interval)
             elapsed += interval
-        raise TimeoutError(f"Backup not ready after {timeout}s")
+        raise TimeoutError(f"Backup not ready after {timeout:.0f}s")
 
     async def download(self) -> bytes:
-        """GET /backup/actions/download — download backup as binary."""
-        async with await self._request("GET", "backup/actions/download") as resp:
+        """GET /backup/actions/download → raw bytes."""
+        async with await self.auth.request(
+            "GET", "backup/actions/download"
+        ) as resp:
             resp.raise_for_status()
             data = await resp.read()
             _LOGGER.info("Backup downloaded: %d bytes", len(data))
             return data
 
     async def generate_and_download(self) -> bytes:
-        """Full backup flow: generate → wait → download."""
-        _LOGGER.info("Starting backup generation…")
+        """Full backup flow: generate → poll → download."""
+        _LOGGER.info("Generating backup…")
         await self.generate()
         _LOGGER.info("Waiting for backup to complete…")
         await self.wait_until_ready()
@@ -167,23 +179,26 @@ class Backup:
     # ------------------------------------------------------------------
 
     async def upload(self, data: bytes) -> ApiResponse[dict]:
-        """POST /backup/actions/upload — upload backup file to router."""
+        """POST /backup/actions/upload — multipart upload."""
         form = aiohttp.FormData()
         form.add_field(
-            "file",
-            io.BytesIO(data),
+            "file", io.BytesIO(data),
             filename="backup.tar.gz",
             content_type="application/octet-stream",
         )
-        async with await self._request(
+        async with await self.auth.request(
             "POST", "backup/actions/upload", data=form
         ) as resp:
             resp.raise_for_status()
             return ApiResponse[dict](**await resp.json())
 
     async def validate(self) -> BackupMetadata:
-        """POST /backup/actions/validate — returns backup metadata."""
-        async with await self._request("POST", "backup/actions/validate") as resp:
+        """POST /backup/actions/validate → metadata."""
+        async with await self.auth.request(
+            "POST", "backup/actions/validate",
+            json={},
+            headers={"Content-Type": "application/json"},
+        ) as resp:
             resp.raise_for_status()
             raw = await resp.json()
             data = raw.get("data", raw)
@@ -192,19 +207,18 @@ class Backup:
             return meta
 
     async def apply(self) -> ApiResponse[dict]:
-        """POST /backup/actions/apply — apply restore (router reboots)."""
-        async with await self._request("POST", "backup/actions/apply") as resp:
+        """POST /backup/actions/apply → router reboots."""
+        async with await self.auth.request(
+            "POST", "backup/actions/apply",
+            json={},
+            headers={"Content-Type": "application/json"},
+        ) as resp:
             resp.raise_for_status()
             return ApiResponse[dict](**await resp.json())
 
     async def restore(self, data: bytes) -> BackupMetadata:
-        """
-        Full restore flow: upload → validate.
-
-        Returns BackupMetadata so the caller can confirm before apply().
-        Call apply() separately after user confirmation.
-        """
-        _LOGGER.info("Uploading backup for restore…")
+        """Upload + validate backup. Call apply() after user confirmation."""
+        _LOGGER.info("Uploading backup…")
         await self.upload(data)
         _LOGGER.info("Validating backup…")
         return await self.validate()
