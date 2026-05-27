@@ -8,12 +8,15 @@ from aiohttp import ClientSession
 
 from teltasync.api_base import ApiResponse
 from teltasync.auth import Auth
+from teltasync.data_usage import DataUsage, ModemDataUsage
 from teltasync.exceptions import (
     TeltonikaAuthenticationError,
     TeltonikaConnectionError,
     TeltonikaException,
 )
+from teltasync.gps import Gps, GpsStatusData
 from teltasync.modems import Modems, ModemStatusFull, ModemStatusOffline
+from teltasync.network import Network, WanStatusData
 from teltasync.system import DeviceStatusData, System
 from teltasync.unauthorized import UnauthorizedClient, UnauthorizedStatusData
 
@@ -45,6 +48,9 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         self._system: System | None = None
         self._modems: Modems | None = None
         self._unauthorized: UnauthorizedClient | None = None
+        self._gps: Gps | None = None
+        self._network: Network | None = None
+        self._data_usage: DataUsage | None = None
 
     @classmethod
     async def create(
@@ -182,6 +188,37 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         response = await self.system.reboot()
         return bool(response and response.success)
 
+    async def get_gps_status(self) -> GpsStatusData | None:
+        """
+        Fetch current GPS position, speed, satellite count and fix status.
+
+        Returns ``None`` when the device has no GPS capability or GPS is disabled.
+        """
+        await self._ensure_session()
+        response = await self.gps.get_status()
+        if response.success and response.data:
+            return response.data
+        return None
+
+    async def get_wan_status(self) -> WanStatusData | None:
+        """
+        Fetch WAN IP address and interface type from the active network interface.
+
+        Returns ``None`` when no active WAN interface is found.
+        """
+        await self._ensure_session()
+        return await self.network.get_wan_status()
+
+    async def get_modem_data_usage(self, modem_id: str) -> ModemDataUsage | None:
+        """
+        Fetch per-SIM data usage statistics (today / last 24 h / week / month …)
+        for the specified modem.
+
+        Returns ``None`` when the endpoint is not available on this firmware version.
+        """
+        await self._ensure_session()
+        return await self.data_usage.get_modem_usage(modem_id)
+
     async def logout(self) -> bool:
         """Log out of the authenticated API session."""
 
@@ -230,6 +267,30 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
                 check_certificate=self._verify_ssl,
             )
         return self._unauthorized
+
+    @property
+    def gps(self) -> Gps:
+        """Return lazy-initialized GPS endpoint client."""
+
+        if self._gps is None:
+            self._gps = Gps(self.auth)
+        return self._gps
+
+    @property
+    def network(self) -> Network:
+        """Return lazy-initialized network endpoint client."""
+
+        if self._network is None:
+            self._network = Network(self.auth)
+        return self._network
+
+    @property
+    def data_usage(self) -> DataUsage:
+        """Return lazy-initialized data usage endpoint client."""
+
+        if self._data_usage is None:
+            self._data_usage = DataUsage(self.auth)
+        return self._data_usage
 
     async def _ensure_session(self) -> ClientSession:
         """Internal helper to guarantee session initialization."""
