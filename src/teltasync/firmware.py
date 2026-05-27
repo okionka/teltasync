@@ -223,3 +223,6 @@ class Firmware:
         if raw is None:
             return ApiResponse[dict](success=False, data=None)
         return ApiResponse[dict](success=True, data=raw.get("data", raw))
+
+# Backward-compatible alias
+FirmwareUpdateInfo = AvailableFirmwareInfo
