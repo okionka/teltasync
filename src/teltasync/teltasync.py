@@ -290,25 +290,30 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
 
     async def export_config(self) -> bytes:
         """
-        Download the router configuration as a binary archive.
-
-        Returns raw bytes of the configuration backup.
-        Raises RuntimeError when no backup endpoint is available.
+        Create and download a configuration backup.
+        Flow: generate → wait → download.
+        Returns raw bytes of the backup archive.
         """
         await self._ensure_session()
-        return await self.backup.export_config()
+        return await self.backup.generate_and_download()
 
-    async def import_config(self, data: bytes) -> bool:
+    async def get_backup_status(self):
+        """Return current backup generation status."""
+        await self._ensure_session()
+        return await self.backup.get_status()
+
+    async def restore_upload_validate(self, data: bytes):
         """
-        Upload a configuration archive to restore router settings.
-
-        Args:
-            data: Raw bytes of the configuration backup.
-
-        Returns True when the router accepted the restore request.
+        Upload a backup and validate it.
+        Returns BackupMetadata — call restore_apply() to complete restore.
         """
         await self._ensure_session()
-        response = await self.backup.import_config(data)
+        return await self.backup.restore(data)
+
+    async def restore_apply(self) -> bool:
+        """Apply the previously validated backup. Router will reboot."""
+        await self._ensure_session()
+        response = await self.backup.apply()
         return bool(response and response.success)
 
     async def logout(self) -> bool:
