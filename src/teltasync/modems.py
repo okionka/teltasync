@@ -580,9 +580,49 @@ class Modems:
             return ApiResponse(**json_response)
 
     async def switch_sim(self, modem_id: str) -> ApiResponse[dict[str, Any]]:
-        """Switch to the next SIM of the specified modem."""
+        """Toggle to the next SIM of the specified modem."""
         async with await self.auth.request(
-            "POST", f"modems/{modem_id}/actions/switch_sim"
+            "POST", f"modems/{modem_id}/actions/switch_sim",
+            json={"data": {}},
         ) as resp:
             json_response = await resp.json()
             return ApiResponse(**json_response)
+
+    async def set_sim(
+        self, modem_id: str, sim_index: int
+    ) -> ApiResponse[dict[str, Any]]:
+        """
+        Set a specific SIM card (1 or 2) as active.
+        Tries several API patterns used across RutOS firmware versions.
+        """
+        import aiohttp, logging
+        _LOG = logging.getLogger(__name__)
+
+        candidates = [
+            ("POST", f"modems/{modem_id}/actions/switch_sim",
+             {"data": {"sim": sim_index}}),
+            ("POST", f"modems/{modem_id}/actions/set_sim",
+             {"data": {"sim": sim_index}}),
+            ("PUT",  f"modems/{modem_id}",
+             {"data": {"sim": sim_index}}),
+            ("POST", f"modems/{modem_id}/actions/switch_sim",
+             {"data": {}, "sim": sim_index}),
+        ]
+        for method, path, body in candidates:
+            try:
+                async with await self.auth.request(method, path, json=body) as resp:
+                    _LOG.warning(
+                        "set_sim: %s %s body=%s → HTTP %s",
+                        method, path, body, resp.status,
+                    )
+                    if resp.status in (404, 501, 405, 422):
+                        continue
+                    resp.raise_for_status()
+                    return ApiResponse(**await resp.json())
+            except aiohttp.ClientResponseError as err:
+                if err.status in (404, 501, 405, 422):
+                    continue
+                raise
+        # Final fallback: toggle (works if current SIM != target)
+        _LOG.warning("set_sim: falling back to toggle switch_sim")
+        return await self.switch_sim(modem_id)

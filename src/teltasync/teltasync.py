@@ -187,6 +187,12 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
             self.modems.switch_sim, modem_id, "switch modem SIM"
         )
 
+    async def set_sim(self, modem_id: str, sim_index: int) -> bool:
+        """Set a specific SIM card (1 or 2) as active on the given modem."""
+        await self._ensure_session()
+        response = await self.modems.set_sim(modem_id, sim_index)
+        return bool(response and response.success)
+
     async def reboot_device(self) -> bool:
         """Trigger device reboot and return whether it was accepted."""
 
