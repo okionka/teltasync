@@ -19,6 +19,7 @@ from teltasync.modems import Modems, ModemStatusFull, ModemStatusOffline
 from teltasync.network import Network, WanStatusData
 from teltasync.system import DeviceStatusData, System
 from teltasync.unauthorized import UnauthorizedClient, UnauthorizedStatusData
+from teltasync.wireless import Wireless, WirelessInterface
 
 AUTH_ERROR_CODES = {120, 121, 122, 123}
 
@@ -51,6 +52,7 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         self._gps: Gps | None = None
         self._network: Network | None = None
         self._data_usage: DataUsage | None = None
+        self._wireless: Wireless | None = None
 
     @classmethod
     async def create(
@@ -219,6 +221,28 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         await self._ensure_session()
         return await self.data_usage.get_modem_usage(modem_id)
 
+    async def get_wireless_interfaces(self) -> list[WirelessInterface]:
+        """
+        Fetch all wireless interfaces with their enabled state, SSID, band, clients.
+
+        Returns an empty list when the endpoint is not available.
+        """
+        await self._ensure_session()
+        response = await self.wireless.get_interfaces()
+        if response.success and response.data:
+            return response.data
+        return []
+
+    async def set_wifi_enabled(self, interface_id: str, enabled: bool) -> bool:
+        """
+        Enable or disable a wireless interface.
+
+        Returns True when the operation was accepted by the router.
+        """
+        await self._ensure_session()
+        response = await self.wireless.set_enabled(interface_id, enabled)
+        return bool(response and response.success)
+
     async def logout(self) -> bool:
         """Log out of the authenticated API session."""
 
@@ -291,6 +315,14 @@ class Teltasync:  # pylint: disable=too-many-instance-attributes
         if self._data_usage is None:
             self._data_usage = DataUsage(self.auth)
         return self._data_usage
+
+    @property
+    def wireless(self) -> Wireless:
+        """Return lazy-initialized wireless endpoint client."""
+
+        if self._wireless is None:
+            self._wireless = Wireless(self.auth)
+        return self._wireless
 
     async def _ensure_session(self) -> ClientSession:
         """Internal helper to guarantee session initialization."""

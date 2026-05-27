@@ -10,6 +10,7 @@ from teltasync.data_usage import DataUsage, ModemDataUsage, SimUsageData
 from teltasync.gps import Gps, GpsStatusData
 from teltasync.network import Network, WanStatusData
 from teltasync.teltasync import Teltasync
+from teltasync.wireless import Wireless, WirelessInterface
 
 __version__ = "0.3.1"
 __all__ = [
