@@ -1,102 +1,116 @@
-"""Configuration backup and restore endpoint bindings for the Teltonika API."""
+"""Configuration backup and restore endpoint bindings for the Teltonika API.
 
+403 Forbidden on backup endpoints typically means the API user lacks
+the required role — ensure the router user has 'admin' access level.
+"""
 import io
+import logging
 from typing import BinaryIO
+
+import aiohttp
 
 from teltasync.api_base import ApiResponse
 from teltasync.auth import Auth
 from teltasync.base_model import TeltasyncBaseModel
 
+_LOGGER = logging.getLogger(__name__)
+
+# Export paths tried in order
+_EXPORT_PATHS = [
+    "system/config/export",
+    "system/config",
+    "system/backup",
+    "system/configuration/backup",
+    "system/settings/export",
+]
+
+# Import / restore paths
+_IMPORT_PATHS = [
+    "system/config/import",
+    "system/config/restore",
+    "system/restore",
+    "system/configuration/restore",
+    "system/settings/import",
+]
+
 
 class BackupResult(TeltasyncBaseModel):
-    """Minimal response wrapper for backup operations."""
+    pass
 
 
 class Backup:
-    """API wrapper for /system/config backup/restore endpoints."""
-
-    # Endpoint paths (tried in order for firmware compatibility)
-    _EXPORT_PATHS = [
-        "system/config/export",
-        "system/configuration/export",
-        "system/backup",
-    ]
-    _IMPORT_PATHS = [
-        "system/config/import",
-        "system/configuration/import",
-        "system/restore",
-    ]
-
     def __init__(self, auth: Auth) -> None:
         self.auth = auth
 
     async def export_config(self) -> bytes:
         """
-        Download the router configuration as a binary archive.
+        Download router configuration as binary archive.
 
-        Returns raw bytes (typically a .tar.gz or .bin file).
+        Raises PermissionError on 403 (insufficient API user privileges).
         Raises RuntimeError when no compatible endpoint is found.
         """
-        import aiohttp
-
-        for path in self._EXPORT_PATHS:
+        for path in _EXPORT_PATHS:
             try:
                 async with await self.auth.request("GET", path) as resp:
                     if resp.status == 404:
+                        _LOGGER.debug("Backup path not found: %s", path)
                         continue
+                    if resp.status == 403:
+                        raise PermissionError(
+                            f"Access denied to backup endpoint '{path}'. "
+                            "Ensure the API user has admin privileges on the router: "
+                            "System → Administration → Users → set role to 'admin'."
+                        )
                     resp.raise_for_status()
-                    return await resp.read()
+                    data = await resp.read()
+                    _LOGGER.info("Config exported via %s (%d bytes)", path, len(data))
+                    return data
+            except PermissionError:
+                raise
             except aiohttp.ClientResponseError as err:
                 if err.status == 404:
                     continue
-                raise
+                _LOGGER.warning("Backup path %s error: %s %s", path, err.status, err.message)
 
         raise RuntimeError(
-            "No backup endpoint found — "
-            f"tried: {', '.join(self._EXPORT_PATHS)}"
+            f"No backup endpoint available. Tried: {', '.join(_EXPORT_PATHS)}. "
+            "Check that Modbus/API is enabled under Services → API on the router."
         )
 
     async def import_config(self, data: bytes | BinaryIO) -> ApiResponse[BackupResult]:
-        """
-        Upload a configuration archive to restore router settings.
-
-        Args:
-            data: Raw bytes or file-like object containing the backup archive.
-
-        Returns:
-            ApiResponse indicating success or failure.
-        """
-        import aiohttp
-
+        """Upload configuration backup to restore router settings."""
         if hasattr(data, "read"):
             raw = data.read()
         else:
             raw = data
 
-        form = aiohttp.FormData()
-        form.add_field(
-            "file",
-            io.BytesIO(raw),
-            filename="config.tar.gz",
-            content_type="application/octet-stream",
-        )
-
-        for path in self._IMPORT_PATHS:
+        for path in _IMPORT_PATHS:
             try:
-                async with await self.auth.request(
-                    "POST", path, data=form
-                ) as resp:
+                form = aiohttp.FormData()
+                form.add_field(
+                    "file",
+                    io.BytesIO(raw),
+                    filename="config.tar.gz",
+                    content_type="application/octet-stream",
+                )
+                async with await self.auth.request("POST", path, data=form) as resp:
                     if resp.status == 404:
                         continue
+                    if resp.status == 403:
+                        raise PermissionError(
+                            f"Access denied to restore endpoint '{path}'. "
+                            "Ensure the API user has admin privileges."
+                        )
                     resp.raise_for_status()
                     json_response = await resp.json()
                     return ApiResponse[BackupResult](**json_response)
+            except PermissionError:
+                raise
             except aiohttp.ClientResponseError as err:
                 if err.status == 404:
                     continue
-                raise
+                _LOGGER.warning("Restore path %s error: %s", path, err)
 
         raise RuntimeError(
-            "No restore endpoint found — "
-            f"tried: {', '.join(self._IMPORT_PATHS)}"
+            f"No restore endpoint available. Tried: {', '.join(_IMPORT_PATHS)}."
         )
