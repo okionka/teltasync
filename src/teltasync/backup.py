@@ -24,6 +24,18 @@ from teltasync.base_model import TeltasyncBaseModel
 
 _LOGGER = logging.getLogger(__name__)
 
+
+from dataclasses import dataclass
+
+
+@dataclass
+class GenerateResult:
+    """Result of POST /backup/actions/generate — contains file checksums."""
+    sha256: str | None = None
+    md5: str | None = None
+    success: bool = True
+
+
 _POLL_INTERVAL = 2.0
 _POLL_TIMEOUT  = 120.0
 
@@ -103,60 +115,28 @@ class Backup:
     # Backup
     # ------------------------------------------------------------------
 
-    async def generate(self) -> ApiResponse[dict]:
+    async def generate(self) -> "GenerateResult":
         """
-        POST /backup/actions/generate.
+        POST /backup/actions/generate  body={"data": {}}
 
-        RutOS API requires a JSON body. Tries several body formats
-        since different firmware versions differ:
-          {"data": {}}  ← primary (RutOS REST envelope)
-          {}            ← fallback 1
-          {"type": "full"} ← fallback 2
+        The router processes the backup synchronously and returns
+        sha256 + md5 checksums when done. No status polling needed.
+
+        Returns GenerateResult with the checksums for optional verification.
         """
-        _GENERATE_PATHS = [
-            "backup/actions/generate",
-            "system/backup/actions/generate",
-            "system/maintenance/backup/generate",
-        ]
-        _BODIES = [
-            {"data": {}},
-            {},
-            {"data": {"type": "full"}},
-        ]
-
-        for path in _GENERATE_PATHS:
-            for body in _BODIES:
-                try:
-                    async with await self.auth.request(
-                        "POST", path, json=body,
-                    ) as resp:
-                        _LOGGER.warning(
-                            "Backup generate: POST %s body=%s → HTTP %s",
-                            path, body, resp.status,
-                        )
-                        if resp.status == 422:
-                            continue  # try next body
-                        if resp.status == 404:
-                            break  # try next path
-                        resp.raise_for_status()
-                        raw = await resp.json()
-                        _LOGGER.warning("Backup generate OK: %s", raw)
-                        return ApiResponse[dict](**raw)
-                except aiohttp.ClientResponseError as err:
-                    if err.status in (404, 422):
-                        _LOGGER.warning(
-                            "Backup generate: POST %s body=%s → %s",
-                            path, body, err.status,
-                        )
-                        if err.status == 404:
-                            break
-                        continue
-                    raise
-
-        raise RuntimeError(
-            "backup/actions/generate: all body formats returned 422 "
-            "— check HA logs for details and report the working format."
-        )
+        async with await self.auth.request(
+            "POST", "backup/actions/generate",
+            json={"data": {}},
+        ) as resp:
+            resp.raise_for_status()
+            raw = await resp.json()
+            _LOGGER.info("Backup generated: %s", raw)
+            data = raw.get("data", raw) or {}
+            return GenerateResult(
+                sha256=data.get("sha256"),
+                md5=data.get("md5"),
+                success=raw.get("success", True),
+            )
 
     async def get_status(self) -> BackupStatus:
         """GET /backup/errors/status — poll until done."""
@@ -205,14 +185,17 @@ class Backup:
             _LOGGER.info("Backup downloaded: %d bytes", len(data))
             return data
 
-    async def generate_and_download(self) -> bytes:
-        """Full backup flow: generate → poll → download."""
-        _LOGGER.info("Generating backup…")
-        await self.generate()
-        _LOGGER.info("Waiting for backup to complete…")
-        await self.wait_until_ready()
-        _LOGGER.info("Downloading backup…")
-        return await self.download()
+    async def generate_and_download(self) -> tuple[bytes, "GenerateResult"]:
+        """
+        Full backup flow: generate → download.
+        No status polling needed — generate() waits synchronously.
+        Returns (bytes, GenerateResult) so caller can verify sha256.
+        """
+        _LOGGER.info("Step 1/2: Generating backup on router…")
+        result = await self.generate()
+        _LOGGER.info("Step 2/2: Downloading backup…")
+        data = await self.download()
+        return data, result
 
     # ------------------------------------------------------------------
     # Restore
@@ -236,8 +219,7 @@ class Backup:
         """POST /backup/actions/validate → metadata."""
         async with await self.auth.request(
             "POST", "backup/actions/validate",
-            json={},
-            headers={"Content-Type": "application/json"},
+            json={"data": {}},
         ) as resp:
             resp.raise_for_status()
             raw = await resp.json()
@@ -250,8 +232,7 @@ class Backup:
         """POST /backup/actions/apply → router reboots."""
         async with await self.auth.request(
             "POST", "backup/actions/apply",
-            json={},
-            headers={"Content-Type": "application/json"},
+            json={"data": {}},
         ) as resp:
             resp.raise_for_status()
             return ApiResponse[dict](**await resp.json())
