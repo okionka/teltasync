@@ -1,6 +1,6 @@
 """Network interface endpoint bindings for the Teltonika API."""
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from teltasync.api_base import ApiResponse
 from teltasync.auth import Auth
@@ -61,6 +61,22 @@ def _infer_type(name: str) -> str:
 _LAN_NAMES = ("br-lan", "lan", "eth0", "ether1")
 
 
+def _strip_cidr(ip: str | None) -> str | None:
+    """Remove CIDR prefix: '192.168.7.1/24' → '192.168.7.1'."""
+    if not ip:
+        return None
+    return ip.split("/")[0].strip()
+
+
+def _parse_iface(data: dict) -> "InterfaceData":
+    """Parse an interface dict, stripping CIDR from IP fields."""
+    cleaned = dict(data)
+    for key in ("ipaddr", "ip6addr", "gateway"):
+        if key in cleaned and cleaned[key]:
+            cleaned[key] = _strip_cidr(str(cleaned[key]))
+    return InterfaceData(**cleaned)
+
+
 class Network:
     """API wrapper for /interfaces endpoints."""
 
@@ -68,10 +84,35 @@ class Network:
         self.auth = auth
 
     async def get_interfaces(self) -> ApiResponse[list[InterfaceData]]:
-        """Return the status of all network interfaces."""
+        """
+        Return the status of all network interfaces.
+
+        Handles both response shapes:
+          List:  {"data": [{"name": "br-lan", "ipaddr": "192.168.7.1/24"}, ...]}
+          Dict:  {"data": {"br-lan": {"ipaddr": "192.168.7.1/24"}, ...}}
+        CIDR notation is stripped from IP addresses: "192.168.7.1/24" → "192.168.7.1"
+        """
         async with await self.auth.request("GET", "interfaces/status") as resp:
             json_response = await resp.json()
-            return ApiResponse[list[InterfaceData]](**json_response)
+
+        raw = json_response.get("data", json_response)
+        ifaces: list[InterfaceData] = []
+
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    ifaces.append(_parse_iface(item))
+
+        elif isinstance(raw, dict):
+            # Dict keyed by interface name: {"br-lan": {...}, "mob1s1a1": {...}}
+            for iface_name, info in raw.items():
+                if isinstance(info, dict):
+                    # Inject the key as "name" if not present in the value
+                    if "name" not in info and "ifname" not in info:
+                        info = {**info, "name": iface_name}
+                    ifaces.append(_parse_iface(info))
+
+        return ApiResponse[list[InterfaceData]](success=True, data=ifaces)
 
     async def get_lan_ip(self) -> str | None:
         """
