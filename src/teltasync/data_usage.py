@@ -13,10 +13,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # Paths tried in order per modem
 _MODEM_PATHS = [
-    "modems/{id}/data_usage",
-    "network/mobile/data_limit",
-    "network/interfaces/mobile/{id}/statistics",
-    "mobile/data_usage",
+    "modems/{id}/data_usage",           # returns data if available
+    "modems/{id}/statistics",           # alternative stats endpoint
+    "network/mobile/statistics",        # general mobile stats
+    "modems/{id}/mobile_data",          # another variant
+    "network/mobile/data_limit",        # fallback (may be 403)
+    "mobile/data_usage",                # legacy fallback
 ]
 
 
@@ -158,6 +160,18 @@ class DataUsage:
                             data = {f"sim{k}": v for k, v in sim_map.items()}
 
                     if isinstance(data, dict):
+                        # Skip responses that only contain status fields (no usage data)
+                        usage_keys = {k for k in data if any(
+                            w in k.lower() for w in
+                            ("rx", "tx", "received", "sent", "bytes", "mb", "today",
+                             "week", "month", "sim")
+                        )}
+                        if not usage_keys:
+                            _LOGGER.debug(
+                                "DataUsage %s: response has no usage data, keys=%s",
+                                path, list(data.keys()),
+                            )
+                            continue
                         sim1 = _parse_sim_block(data, 1)
                         sim2 = _parse_sim_block(data, 2)
                         if sim1 or sim2:

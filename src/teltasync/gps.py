@@ -103,8 +103,10 @@ class GpsStatusData(TeltasyncBaseModel):
     datetime: str | None = Field(
         None,
         validation_alias=AliasChoices(
+            "timestamp",          # ← RUTX50 actual field name
+            "utc_timestamp",      # ← RUTX50 UTC timestamp
             "datetime", "dateTime", "date_time",
-            "timestamp", "utc_datetime", "time",
+            "utc_datetime", "time",
         ),
     )
     date: str | None = Field(
@@ -123,6 +125,20 @@ class GpsStatusData(TeltasyncBaseModel):
     @classmethod
     def _parse_int(cls, v: Any) -> int | None:
         return _to_int(v)
+
+    @field_validator("fix_status", mode="before")
+    @classmethod
+    def _normalize_fix_status(cls, v: Any) -> str | None:
+        """Convert numeric/string fix_status to human-readable 'Fix'/'No fix'."""
+        if v is None or v == "":
+            return None
+        s = str(v).strip()
+        # Numeric: '1' = fix, '0' = no fix
+        if s in ("1", "2", "3", "3d", "2d", "true", "yes", "fix", "fixed", "acquired"):
+            return "Fix"
+        if s in ("0", "false", "no", "nofix", "no fix", "none"):
+            return "No fix"
+        return s  # keep as-is if unknown
 
     @field_validator("fix", mode="before")
     @classmethod
