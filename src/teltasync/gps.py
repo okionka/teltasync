@@ -14,11 +14,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # All known GPS endpoint paths across RutOS firmware versions — tried in order
 _GPS_PATHS = [
-    "gps/position/status",   # RUTX50 RutOS 7.x primary
-    "gps/status",
-    "gps/position",
-    "gps",
-    "device/gps/status",
+    "gps/position/status",        # RUTX50 RutOS 7.x primary
+    "gps/status",                 # common
+    "gps/position",               # alternative
+    "gps",                        # bare endpoint
+    "gps/position/coordinates",   # RUT956 possible path
+    "device/gps/status",          # legacy
+    "tracking/position",          # RUT956/TRB series
 ]
 
 

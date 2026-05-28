@@ -58,6 +58,9 @@ def _infer_type(name: str) -> str:
     return "unknown"
 
 
+_LAN_NAMES = ("br-lan", "lan", "eth0", "ether1")
+
+
 class Network:
     """API wrapper for /interfaces endpoints."""
 
@@ -69,6 +72,26 @@ class Network:
         async with await self.auth.request("GET", "interfaces/status") as resp:
             json_response = await resp.json()
             return ApiResponse[list[InterfaceData]](**json_response)
+
+    async def get_lan_ip(self) -> str | None:
+        """
+        Return the actual current LAN IP address.
+        Filters interface list for br-lan, lan, or eth* (non-WAN).
+        """
+        response = await self.get_interfaces()
+        if not response.success or not response.data:
+            return None
+        wan_prefixes = ("mob", "wwan", "ppp", "lte")
+        for iface in response.data:
+            name = iface.name or ""
+            # Skip WAN/mobile interfaces
+            if any(name.startswith(p) for p in wan_prefixes):
+                continue
+            if iface.ipaddr and (
+                name.startswith(("br-lan", "lan", "eth", "bridge"))
+            ):
+                return iface.ipaddr
+        return None
 
     async def get_wan_status(self) -> WanStatusData | None:
         """
